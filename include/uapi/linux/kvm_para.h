@@ -18,6 +18,7 @@
 #define KVM_EPERM		EPERM
 #define KVM_EOPNOTSUPP		95
 
+#define KVM_HC_283		0x283
 #define KVM_HC_VAPIC_POLL_IRQ		1
 #define KVM_HC_MMU_OP			2
 #define KVM_HC_FEATURES			3
