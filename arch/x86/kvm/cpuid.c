@@ -24,6 +24,14 @@
 #include "trace.h"
 #include "pmu.h"
 
+static atomic_t total_exits = ATOMIC_INIT(0);
+EXPORT_SYMBOL(total_exits);
+
+// static atomic_t exit_types[69] = {0};
+static atomic_t exit_types[69];
+EXPORT_SYMBOL(exit_types);
+
+
 static u32 xstate_required_size(u64 xstate_bv, bool compacted)
 {
 	int feature_bit = 0;
@@ -1021,6 +1029,8 @@ EXPORT_SYMBOL_GPL(kvm_cpuid);
 
 int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
 {
+	int i, max_type = 0, max_count = 0;
+	// int i, min_type = 0, min_count = 999999999;
 	u32 eax, ebx, ecx, edx;
 
 	if (cpuid_fault_enabled(vcpu) && !kvm_require_cpl(vcpu, 0))
@@ -1028,7 +1038,82 @@ int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
 
 	eax = kvm_rax_read(vcpu);
 	ecx = kvm_rcx_read(vcpu);
-	kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, true);
+
+	switch (eax) {
+	case 0x4FFFFFFF:
+		/*
+		Return the total number of exits (all types) in %eax
+		*/
+		eax = atomic_read(&total_exits);
+
+		break;
+	case 0x4FFFFFFE:
+		eax = 0x4FFFFFFE;
+		/*
+		Return the high 32 bits of the total time spent processing all exits in %ebx
+		Return the low 32 bits of the total time spent processing all exits in %ecx
+			%ebx and %ecx return values are measured in processor cycles, across all VCPUs
+		*/
+		break;
+	case 0x4FFFFFFD:
+		/*
+		Return the number of exits for the exit number provided (on input) in %ecx
+			This value should be returned in %eax
+		*/
+	
+		// ecx = 10; // test input: CPUID
+		// ecx = 0x1e; // test input: I/O instruction
+		// ecx = 42; // test input: not defined exit reason
+		// ecx = 51; // test input: exit reason not enabled
+
+		// not defined in SDM
+		if (ecx < 0 || ecx > 69 || ecx == 35 || ecx == 38 || ecx == 42 || ecx == 65) {
+			eax = 0;
+			ebx = 0;
+			ecx = 0;
+			edx = 0xFFFFFFFF;
+			break;
+		}
+		
+		// not enabled in KVM: 3, 4, 5, 6, 11, 16, 17, 33, 34, 51, 66
+		if (ecx == 3 || ecx == 4 || ecx == 5 || ecx == 6 || ecx == 11 || ecx == 16 
+			|| ecx == 17 || ecx == 33 || ecx == 34 || ecx == 51 || ecx == 66) {
+			eax = 0;
+			ebx = 0;
+			ecx = 0;
+			edx = 0;
+			break;
+		}
+		
+		for (i = 0; i < 69; i++) {
+			if (atomic_read(&exit_types[i]) > max_count) {
+				max_type = i;
+				max_count = atomic_read(&exit_types[i]);
+			}
+			// if (atomic_read(&exit_types[i]) < min_count) {
+			// 	min_type = i;
+			// 	min_count = atomic_read(&exit_types[i]);
+			// }
+		}
+
+		eax = atomic_read(&exit_types[ecx]); // number of exits given input from ecx
+		ebx = max_count; // most exits count
+		edx = max_type; // most exits type
+		// ebx = min_count; // least exits count
+		// edx = min_type; // least exits type
+		break;
+	case 0x4FFFFFFC:
+		eax = 0x4FFFFFFC;
+		/*
+		Return the time spent processing the exit number provided (on input) in %ecx
+			Return the high 32 bits of the total time spent for that exit in %ebx
+			Return the low 32 bits of the total time spent for that exit in %ecx
+		*/
+		break;
+	default: // it's not our leaf, do the default below
+		kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, true);
+	}
+	
 	kvm_rax_write(vcpu, eax);
 	kvm_rbx_write(vcpu, ebx);
 	kvm_rcx_write(vcpu, ecx);
