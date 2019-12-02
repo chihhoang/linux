@@ -31,6 +31,11 @@ EXPORT_SYMBOL(total_exits);
 static atomic_t exit_types[69];
 EXPORT_SYMBOL(exit_types);
 
+static atomic64_t all_exits_time;
+EXPORT_SYMBOL(all_exits_time);
+
+static atomic64_t exit_types_time[69];
+EXPORT_SYMBOL(exit_types_time);
 
 static u32 xstate_required_size(u64 xstate_bv, bool compacted)
 {
@@ -1027,11 +1032,22 @@ out:
 }
 EXPORT_SYMBOL_GPL(kvm_cpuid);
 
+int is_SDM_undefined(int reason) {
+	return reason < 0 || reason > 69 || reason == 35 || reason == 38 || reason == 42 || reason == 65;
+}
+
+int is_kvm_disabled(int reason) {
+	return reason == 3 || reason == 4 || reason == 5 || reason == 6 || reason == 11 || reason == 16 
+			|| reason == 17 || reason == 33 || reason == 34 || reason == 51 || reason == 66;
+}
+
+
 int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
 {
 	int i, max_type = 0, max_count = 0;
 	// int i, min_type = 0, min_count = 999999999;
 	u32 eax, ebx, ecx, edx;
+	u64 cycles = 0;
 
 	if (cpuid_fault_enabled(vcpu) && !kvm_require_cpl(vcpu, 0))
 		return 1;
@@ -1048,12 +1064,18 @@ int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
 
 		break;
 	case 0x4FFFFFFE:
-		eax = 0x4FFFFFFE;
 		/*
 		Return the high 32 bits of the total time spent processing all exits in %ebx
 		Return the low 32 bits of the total time spent processing all exits in %ecx
 			%ebx and %ecx return values are measured in processor cycles, across all VCPUs
 		*/
+		cycles = (u64) atomic64_read(&all_exits_time);
+
+		// high
+		ebx = cycles >> 32;
+		// low
+		ecx = cycles;
+
 		break;
 	case 0x4FFFFFFD:
 		/*
@@ -1063,11 +1085,11 @@ int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
 	
 		// ecx = 10; // test input: CPUID
 		// ecx = 0x1e; // test input: I/O instruction
-		// ecx = 42; // test input: not defined exit reason
-		// ecx = 51; // test input: exit reason not enabled
+		// ecx = 42; // test input: undefined exit reason in SDM
+		// ecx = 51; // test input: exit reason not enabled in kvm
 
 		// not defined in SDM
-		if (ecx < 0 || ecx > 69 || ecx == 35 || ecx == 38 || ecx == 42 || ecx == 65) {
+		if (is_SDM_undefined(ecx)) {
 			eax = 0;
 			ebx = 0;
 			ecx = 0;
@@ -1076,8 +1098,7 @@ int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
 		}
 		
 		// not enabled in KVM: 3, 4, 5, 6, 11, 16, 17, 33, 34, 51, 66
-		if (ecx == 3 || ecx == 4 || ecx == 5 || ecx == 6 || ecx == 11 || ecx == 16 
-			|| ecx == 17 || ecx == 33 || ecx == 34 || ecx == 51 || ecx == 66) {
+		if (is_kvm_disabled(ecx)) {
 			eax = 0;
 			ebx = 0;
 			ecx = 0;
@@ -1103,12 +1124,41 @@ int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
 		// edx = min_type; // least exits type
 		break;
 	case 0x4FFFFFFC:
-		eax = 0x4FFFFFFC;
 		/*
 		Return the time spent processing the exit number provided (on input) in %ecx
 			Return the high 32 bits of the total time spent for that exit in %ebx
 			Return the low 32 bits of the total time spent for that exit in %ecx
 		*/
+		// ecx = 10; // test input: CPUID
+		// ecx = 0x1e; // test input: I/O instruction
+		// ecx = 42; // test input: undefined exit reason in SDM
+		// ecx = 51; // test input: exit reason not enabled in kvm
+
+		// not defined in SDM
+		if (is_SDM_undefined(ecx)) {
+			eax = 0;
+			ebx = 0;
+			ecx = 0;
+			edx = 0xFFFFFFFF;
+			break;
+		}
+		
+		// not enabled in KVM: 3, 4, 5, 6, 11, 16, 17, 33, 34, 51, 66
+		if (is_kvm_disabled(ecx)) {
+			eax = 0;
+			ebx = 0;
+			ecx = 0;
+			edx = 0;
+			break;
+		}
+
+		cycles = (u64) atomic64_read(&exit_types_time[ecx]);
+
+		// high
+		ebx = cycles >> 32;
+		// low
+		ecx = cycles;
+
 		break;
 	default: // it's not our leaf, do the default below
 		kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, true);
